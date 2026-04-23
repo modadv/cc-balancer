@@ -1,0 +1,49 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+
+gateway:
+  authToken: ${CC_BALANCER_AUTH_TOKEN}
+
+log:
+  level: info
+
+routing:
+  strategy: least-fail
+
+upstreams:
+  - id: official-1
+    baseUrl: https://api.anthropic.com
+    apiKey: ${ANTHROPIC_KEY_1}
+    weight: 2
+
+  - id: official-2
+    baseUrl: https://api.anthropic.com
+    apiKey: ${ANTHROPIC_KEY_2}
+    weight: 1
+
+retry:
+  maxAttempts: 4
+  perUpstreamRetries: 2
+  backoff:
+    type: exponential
+    baseDelayMs: 200
+    maxDelayMs: 2000
+
+cooldown:
+  rateLimit: 60
+  quotaExceeded: 300
+  serverError: 10
+  networkError: 15
+
+health:
+  enable: true
+  path: /health
+
+metrics:
+  enable: true
+  path: /metrics
+
+status:
+  enable: true
+  path: /upstreams

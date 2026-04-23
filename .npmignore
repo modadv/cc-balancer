@@ -1,0 +1,16 @@
+.git/
+.gitignore
+.omx/
+docs/
+src/
+test/
+node_modules/
+coverage/
+.vitest/
+
+*.log
+*.pid
+*.tgz
+
+tsconfig.json
+package-lock.json

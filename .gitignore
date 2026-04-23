@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+.vitest/
+
+.omx/
+.env
+.env.*
+!.env.example
+
+*.log
+*.pid
+*.tgz
+
+.DS_Store
+Thumbs.db
