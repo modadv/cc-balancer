@@ -6,6 +6,33 @@ import { fetch, request } from 'undici';
 import { createServer } from '../../src/server/createServer.js';
 import type { Config } from '../../src/core/types.js';
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+
+  return { promise, resolve, reject };
+}
+
+async function waitForExpectation(assertion: () => Promise<void> | void): Promise<void> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  throw lastError;
+}
+
 async function startUpstream(statusCode: number, body: unknown) {
   const app = Fastify();
   app.post('/v1/messages', async (_request, reply) => reply.code(statusCode).send(body));
@@ -28,6 +55,7 @@ function createConfig(upstreams: Config['upstreams'], overrides?: Partial<Config
     gateway: {},
     log: { level: 'error' },
     routing: { strategy: 'round-robin' },
+    concurrency: { acquireTimeoutMs: 50, maxPendingRequests: 10 },
     upstreams,
     retry: {
       maxAttempts: 2,
@@ -282,5 +310,230 @@ describe('gateway integration', () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ status: 'ok' });
+  });
+
+  it('spreads concurrent least-fail requests across idle upstreams', async () => {
+    const upstreamIdsSeen: string[] = [];
+    const upstreamA = Fastify();
+    const upstreamB = Fastify();
+
+    upstreamA.post('/v1/messages', async () => {
+      upstreamIdsSeen.push('a');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return { upstream: 'a' };
+    });
+    upstreamB.post('/v1/messages', async () => {
+      upstreamIdsSeen.push('b');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return { upstream: 'b' };
+    });
+
+    await upstreamA.listen({ host: '127.0.0.1', port: 0 });
+    await upstreamB.listen({ host: '127.0.0.1', port: 0 });
+    startedServers.push(upstreamA, upstreamB);
+
+    const upstreamAAddress = upstreamA.server.address();
+    const upstreamBAddress = upstreamB.server.address();
+
+    if (!upstreamAAddress || typeof upstreamAAddress === 'string' || !upstreamBAddress || typeof upstreamBAddress === 'string') {
+      throw new Error('failed to resolve upstream address');
+    }
+
+    const gateway = await createServer(
+      createConfig(
+        [
+          { id: 'a', baseUrl: `http://127.0.0.1:${upstreamAAddress.port}`, apiKey: 'key-a' },
+          { id: 'b', baseUrl: `http://127.0.0.1:${upstreamBAddress.port}`, apiKey: 'key-b' }
+        ],
+        {
+          routing: { strategy: 'least-fail' }
+        }
+      )
+    );
+    startedServers.push(gateway);
+    await gateway.listen({ host: '127.0.0.1', port: 0 });
+    const gatewayAddress = gateway.server.address();
+
+    if (!gatewayAddress || typeof gatewayAddress === 'string') {
+      throw new Error('failed to resolve gateway address');
+    }
+
+    const responses = await Promise.all([
+      fetch(`http://127.0.0.1:${gatewayAddress.port}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] })
+      }),
+      fetch(`http://127.0.0.1:${gatewayAddress.port}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] })
+      })
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(responses.map((response) => response.headers.get('x-upstream-id')).sort()).toEqual(['a', 'b']);
+    await Promise.all(responses.map((response) => response.json()));
+    expect(upstreamIdsSeen.sort()).toEqual(['a', 'b']);
+  });
+
+  it('rejects new requests when the only upstream is at its concurrency limit', async () => {
+    const firstRequestReachedUpstream = deferred();
+    const releaseFirstRequest = deferred();
+    const upstream = Fastify();
+
+    upstream.post('/v1/messages', async () => {
+      firstRequestReachedUpstream.resolve();
+      await releaseFirstRequest.promise;
+      return { ok: true };
+    });
+
+    await upstream.listen({ host: '127.0.0.1', port: 0 });
+    startedServers.push(upstream);
+    const upstreamAddress = upstream.server.address();
+
+    if (!upstreamAddress || typeof upstreamAddress === 'string') {
+      throw new Error('failed to resolve upstream address');
+    }
+
+    const gateway = await createServer(
+      createConfig(
+        [{ id: 'limited', baseUrl: `http://127.0.0.1:${upstreamAddress.port}`, apiKey: 'key', maxConcurrentRequests: 1 }],
+        {
+          concurrency: { acquireTimeoutMs: 1, maxPendingRequests: 10 },
+          retry: {
+            maxAttempts: 1,
+            perUpstreamRetries: 0,
+            backoff: { type: 'fixed', baseDelayMs: 1, maxDelayMs: 1 }
+          }
+        }
+      )
+    );
+    startedServers.push(gateway);
+    await gateway.listen({ host: '127.0.0.1', port: 0 });
+    const gatewayAddress = gateway.server.address();
+
+    if (!gatewayAddress || typeof gatewayAddress === 'string') {
+      throw new Error('failed to resolve gateway address');
+    }
+
+    const firstResponsePromise = fetch(`http://127.0.0.1:${gatewayAddress.port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] })
+    });
+
+    await firstRequestReachedUpstream.promise;
+
+    const secondResponse = await fetch(`http://127.0.0.1:${gatewayAddress.port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] })
+    });
+    expect(secondResponse.status).toBe(503);
+    await expect(secondResponse.json()).resolves.toEqual({ error: 'No available upstreams' });
+
+    const statusResponse = await fetch(`http://127.0.0.1:${gatewayAddress.port}/upstreams`);
+    const statusJson = (await statusResponse.json()) as { upstreams: Array<{ id: string; available: boolean; inFlight: number }> };
+    expect(statusJson.upstreams).toEqual([
+      expect.objectContaining({
+        id: 'limited',
+        available: false,
+        inFlight: 1
+      })
+    ]);
+
+    const metricsResponse = await fetch(`http://127.0.0.1:${gatewayAddress.port}/metrics`);
+    const metricsJson = (await metricsResponse.json()) as {
+      currentInFlightRequests: number;
+      pendingAcquireRequests: number;
+      upstreamInFlightById: Record<string, number>;
+    };
+    expect(metricsJson.currentInFlightRequests).toBe(1);
+    expect(metricsJson.pendingAcquireRequests).toBe(0);
+    expect(metricsJson.upstreamInFlightById.limited).toBe(1);
+
+    releaseFirstRequest.resolve();
+
+    const firstResponse = await firstResponsePromise;
+    expect(firstResponse.status).toBe(200);
+    await expect(firstResponse.json()).resolves.toEqual({ ok: true });
+  });
+
+  it('queues saturated requests and dispatches them when capacity recovers', async () => {
+    const firstRequestReachedUpstream = deferred();
+    const releaseFirstRequest = deferred();
+    const upstream = Fastify();
+    let requestCount = 0;
+
+    upstream.post('/v1/messages', async () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        firstRequestReachedUpstream.resolve();
+        await releaseFirstRequest.promise;
+      }
+
+      return { requestCount };
+    });
+
+    await upstream.listen({ host: '127.0.0.1', port: 0 });
+    startedServers.push(upstream);
+    const upstreamAddress = upstream.server.address();
+
+    if (!upstreamAddress || typeof upstreamAddress === 'string') {
+      throw new Error('failed to resolve upstream address');
+    }
+
+    const gateway = await createServer(
+      createConfig(
+        [{ id: 'queued', baseUrl: `http://127.0.0.1:${upstreamAddress.port}`, apiKey: 'key', maxConcurrentRequests: 1 }],
+        {
+          concurrency: { acquireTimeoutMs: 1_000, maxPendingRequests: 2 },
+          retry: {
+            maxAttempts: 1,
+            perUpstreamRetries: 0,
+            backoff: { type: 'fixed', baseDelayMs: 1, maxDelayMs: 1 }
+          }
+        }
+      )
+    );
+    startedServers.push(gateway);
+    await gateway.listen({ host: '127.0.0.1', port: 0 });
+    const gatewayAddress = gateway.server.address();
+
+    if (!gatewayAddress || typeof gatewayAddress === 'string') {
+      throw new Error('failed to resolve gateway address');
+    }
+
+    const firstResponsePromise = fetch(`http://127.0.0.1:${gatewayAddress.port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] })
+    });
+
+    await firstRequestReachedUpstream.promise;
+
+    const secondResponsePromise = fetch(`http://127.0.0.1:${gatewayAddress.port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] })
+    });
+
+    await waitForExpectation(async () => {
+      const metricsResponse = await fetch(`http://127.0.0.1:${gatewayAddress.port}/metrics`);
+      const metricsJson = (await metricsResponse.json()) as { currentInFlightRequests: number; pendingAcquireRequests: number };
+      expect(metricsJson.currentInFlightRequests).toBe(1);
+      expect(metricsJson.pendingAcquireRequests).toBe(1);
+    });
+
+    releaseFirstRequest.resolve();
+
+    const firstResponse = await firstResponsePromise;
+    expect(firstResponse.status).toBe(200);
+    await expect(firstResponse.json()).resolves.toEqual({ requestCount: 1 });
+
+    const secondResponse = await secondResponsePromise;
+    expect(secondResponse.status).toBe(200);
+    await expect(secondResponse.json()).resolves.toEqual({ requestCount: 2 });
   });
 });

@@ -9,6 +9,7 @@ const baseConfig: Config = {
   gateway: {},
   log: { level: 'info' },
   routing: { strategy: 'least-fail' },
+  concurrency: { acquireTimeoutMs: 20, maxPendingRequests: 10 },
   upstreams: [
     { id: 'a', baseUrl: 'https://a.example.com', apiKey: 'a' },
     { id: 'b', baseUrl: 'https://b.example.com', apiKey: 'b' }
@@ -58,5 +59,88 @@ describe('Scheduler', () => {
     const selected = scheduler.selectUpstream();
 
     expect(selected?.id).toBe('b');
+  });
+
+  it('prefers an idle upstream over one with in-flight work', () => {
+    const pool = new UpstreamPool(baseConfig);
+    const scheduler = new Scheduler(baseConfig, pool);
+    const [a] = pool.getAll();
+
+    expect(pool.reserve(a!)).toBe(true);
+
+    const selected = scheduler.selectUpstream();
+
+    expect(selected?.id).toBe('b');
+  });
+
+  it('ignores upstreams that reached their concurrency limit', () => {
+    const config: Config = {
+      ...baseConfig,
+      upstreams: [
+        { id: 'a', baseUrl: 'https://a.example.com', apiKey: 'a', maxConcurrentRequests: 1 },
+        { id: 'b', baseUrl: 'https://b.example.com', apiKey: 'b', maxConcurrentRequests: 1 }
+      ]
+    };
+    const pool = new UpstreamPool(config);
+    const scheduler = new Scheduler(config, pool);
+    const [a] = pool.getAll();
+
+    expect(pool.reserve(a!)).toBe(true);
+
+    const selected = scheduler.selectUpstream();
+
+    expect(selected?.id).toBe('b');
+  });
+
+  it('queues an acquire until capacity is released', async () => {
+    const config: Config = {
+      ...baseConfig,
+      upstreams: [{ id: 'a', baseUrl: 'https://a.example.com', apiKey: 'a', maxConcurrentRequests: 1 }]
+    };
+    const pool = new UpstreamPool(config);
+    const scheduler = new Scheduler(config, pool);
+    const [a] = pool.getAll();
+
+    expect(pool.reserve(a!)).toBe(true);
+
+    const acquired = scheduler.acquireUpstream();
+    expect(scheduler.getPendingAcquireCount()).toBe(1);
+
+    pool.release(a!);
+
+    await expect(acquired).resolves.toMatchObject({ id: 'a' });
+    expect(scheduler.getPendingAcquireCount()).toBe(0);
+    expect(a!.inFlight).toBe(1);
+  });
+
+  it('times out a queued acquire when capacity does not recover', async () => {
+    const config: Config = {
+      ...baseConfig,
+      concurrency: { acquireTimeoutMs: 1, maxPendingRequests: 1 },
+      upstreams: [{ id: 'a', baseUrl: 'https://a.example.com', apiKey: 'a', maxConcurrentRequests: 1 }]
+    };
+    const pool = new UpstreamPool(config);
+    const scheduler = new Scheduler(config, pool);
+    const [a] = pool.getAll();
+
+    expect(pool.reserve(a!)).toBe(true);
+
+    await expect(scheduler.acquireUpstream()).resolves.toBeNull();
+    expect(scheduler.getPendingAcquireCount()).toBe(0);
+  });
+
+  it('rejects acquires when the pending queue is full', async () => {
+    const config: Config = {
+      ...baseConfig,
+      concurrency: { acquireTimeoutMs: 20, maxPendingRequests: 0 },
+      upstreams: [{ id: 'a', baseUrl: 'https://a.example.com', apiKey: 'a', maxConcurrentRequests: 1 }]
+    };
+    const pool = new UpstreamPool(config);
+    const scheduler = new Scheduler(config, pool);
+    const [a] = pool.getAll();
+
+    expect(pool.reserve(a!)).toBe(true);
+
+    await expect(scheduler.acquireUpstream()).rejects.toThrow('Upstream admission queue is full');
   });
 });

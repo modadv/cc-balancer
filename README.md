@@ -72,6 +72,8 @@ This is especially useful when you want budget-first usage, uninterrupted long-r
 - Automatic failover on `429`, `403`, `5xx`, timeout, and network errors
 - Cooldown windows per error type
 - Request-level retry and upstream rotation
+- In-flight aware routing for multiple concurrent Claude Code clients
+- Optional per-upstream concurrency caps
 - Anthropic-compatible proxying for Claude Code
 - Health, metrics, and upstream status endpoints
 - Config validation before startup
@@ -84,6 +86,8 @@ This is especially useful when you want budget-first usage, uninterrupted long-r
 - 对 `429`、`403`、`5xx`、超时和网络错误自动切换
 - 按错误类型分别应用 cooldown
 - 请求级重试与 upstream 轮换
+- 面向多个 Claude Code 客户端的 in-flight 感知调度
+- 可选的单 upstream 并发上限
 - 面向 Claude Code 的 Anthropic 兼容代理
 - 健康检查、指标和 upstream 状态接口
 - 启动前配置校验
@@ -189,11 +193,16 @@ log:
 routing:
   strategy: least-fail
 
+concurrency:
+  acquireTimeoutMs: 30000
+  maxPendingRequests: 1024
+
 upstreams:
   - id: official-1
     baseUrl: https://api.anthropic.com
     apiKey: ${ANTHROPIC_KEY_1}
     weight: 2
+    maxConcurrentRequests: 4
 
   - id: official-2
     baseUrl: https://api.anthropic.com
@@ -269,6 +278,61 @@ curl -H "Authorization: Bearer $CC_BALANCER_AUTH_TOKEN" http://127.0.0.1:8000/me
 `/health` is public by default for liveness checks. Management endpoints such as `/upstreams` and `/metrics` follow gateway auth when configured.
 
 默认情况下 `/health` 可匿名访问，方便存活探测；`/upstreams` 和 `/metrics` 在配置了网关认证时需要 Bearer token。
+
+## Logging / 日志
+
+`cc-balancer` writes structured JSON logs to stdout/stderr through Fastify/Pino, which works well with npm package usage, systemd, Docker, and hosted log collectors. Configure verbosity with:
+
+`cc-balancer` 通过 Fastify/Pino 输出结构化 JSON 日志到 stdout/stderr，适合 npm package、systemd、Docker 和日志采集系统。通过以下配置控制日志级别：
+
+```yaml
+log:
+  level: info
+```
+
+`log.level` defaults to `info`. Supported levels are `info`, `warn`, and `error`; `debug` is also available for temporary troubleshooting.
+
+`log.level` 默认值为 `info`。支持 `info`、`warn`、`error`；也可以在临时排障时使用 `debug`。
+
+Use `info` in production for request lifecycle, upstream selection, retries, cooldown, auth failures, startup summaries, and shutdown events. Use `debug` when diagnosing high-concurrency admission queue behavior, lease release timing, or retry delays.
+
+生产环境建议使用 `info`，用于记录请求生命周期、upstream 选择、重试、cooldown、认证失败、启动摘要和关闭事件。排查高并发准入队列、租约释放时机或重试延迟时可临时切换到 `debug`。
+
+Sensitive credentials are redacted or omitted from logs. The gateway logs upstream `id` and `baseUrl`, but never upstream API keys or gateway auth tokens.
+
+敏感凭证会被脱敏或直接不输出。日志会记录 upstream 的 `id` 和 `baseUrl`，但不会记录真实 upstream API key 或 gateway auth token。
+
+## Concurrency / 并发模型
+
+Each gateway process tracks upstream cooldown, failure counters, and in-flight requests in memory. When several Claude Code instances use the same gateway, `least-fail` routing prefers upstreams with fewer active requests before comparing failure counts, which prevents a cold gateway from concentrating simultaneous work on one API key.
+
+每个网关进程会在内存中跟踪 upstream 的 cooldown、失败计数和当前 in-flight 请求数。当多个 Claude Code 实例连接同一个网关时，`least-fail` 会先选择当前活跃请求更少的 upstream，再比较失败计数，避免冷启动时把并发请求全部打到同一个 API Key。
+
+Set `maxConcurrentRequests` on an upstream to cap how many active requests one key/provider may handle at the same time:
+
+可以在单个 upstream 上设置 `maxConcurrentRequests`，限制某个 key/provider 同时处理的请求数：
+
+```yaml
+upstreams:
+  - id: official-1
+    baseUrl: https://api.anthropic.com
+    apiKey: ${ANTHROPIC_KEY_1}
+    maxConcurrentRequests: 4
+```
+
+When every upstream is cooling down or saturated, requests enter a bounded admission queue instead of immediately competing with each other. `concurrency.acquireTimeoutMs` controls how long a request may wait for capacity, and `concurrency.maxPendingRequests` caps the queue to protect the process under overload:
+
+当所有 upstream 都在 cooldown 或达到并发上限时，请求会进入有界准入队列，而不是各客户端立即相互抢占。`concurrency.acquireTimeoutMs` 控制单个请求最多等待容量恢复多久，`concurrency.maxPendingRequests` 限制等待队列长度，避免过载时拖垮进程：
+
+```yaml
+concurrency:
+  acquireTimeoutMs: 30000
+  maxPendingRequests: 1024
+```
+
+The gateway returns `503` only when no upstream recovers before the acquire timeout, the pending queue is full, or every attempted upstream fails. `/upstreams` includes each upstream's `inFlight` value, and `/metrics` includes current in-flight totals plus `pendingAcquireRequests`.
+
+只有在等待超时、等待队列已满，或所有已尝试的 upstream 都失败时，网关才会返回 `503`。`/upstreams` 会返回每个 upstream 的 `inFlight`，`/metrics` 会返回当前 in-flight 汇总以及 `pendingAcquireRequests`。
 
 ## Roadmap / 路线图
 

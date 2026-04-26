@@ -11,11 +11,16 @@ log:
 routing:
   strategy: least-fail
 
+concurrency:
+  acquireTimeoutMs: 30000
+  maxPendingRequests: 1024
+
 upstreams:
   - id: official-1
     baseUrl: https://api.anthropic.com
     apiKey: ${ANTHROPIC_KEY_1}
     weight: 2
+    maxConcurrentRequests: 4
 
   - id: official-2
     baseUrl: https://api.anthropic.com

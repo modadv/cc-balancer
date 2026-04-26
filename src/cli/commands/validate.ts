@@ -19,7 +19,8 @@ export function registerValidateCommand(program: Command): void {
             upstreamCount: config.upstreams.length,
             gatewayAuthEnabled: Boolean(config.gateway.authToken),
             server: config.server,
-            routing: config.routing
+            routing: config.routing,
+            concurrency: config.concurrency
           },
           null,
           2

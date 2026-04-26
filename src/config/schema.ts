@@ -7,7 +7,8 @@ const upstreamSchema = z.object({
   id: z.string().min(1, 'upstream id is required'),
   baseUrl: z.url('upstream baseUrl must be a valid URL'),
   apiKey: z.string().min(1, 'upstream apiKey is required'),
-  weight: z.number().int().positive().default(1)
+  weight: z.number().int().positive().default(1),
+  maxConcurrentRequests: z.number().int().positive().optional()
 });
 
 const configSchema = z
@@ -31,6 +32,12 @@ const configSchema = z
         strategy: z.enum(['round-robin', 'random', 'least-fail', 'weighted']).default(DEFAULT_CONFIG.routing.strategy)
       })
       .default(DEFAULT_CONFIG.routing),
+    concurrency: z
+      .object({
+        acquireTimeoutMs: z.number().int().nonnegative().default(DEFAULT_CONFIG.concurrency.acquireTimeoutMs),
+        maxPendingRequests: z.number().int().nonnegative().default(DEFAULT_CONFIG.concurrency.maxPendingRequests)
+      })
+      .default(DEFAULT_CONFIG.concurrency),
     upstreams: z.array(upstreamSchema).min(1, 'at least one upstream is required'),
     retry: z
       .object({

@@ -9,6 +9,7 @@ import { registerHealthRoute } from './routes/health.js';
 import { registerMetricsRoute } from './routes/metrics.js';
 import { registerProxyRoutes } from './routes/proxy.js';
 import { registerUpstreamsRoute } from './routes/upstreams.js';
+import { LOG_REDACT_PATHS } from '../utils/logger.js';
 
 function extractBearerToken(request: FastifyRequest): string | null {
   const authorization = request.headers.authorization;
@@ -40,6 +41,7 @@ function registerGatewayAuth(app: FastifyInstance, config: Config): void {
       return;
     }
 
+    request.log.warn({ path: requestPath, remoteAddress: request.ip }, 'unauthorized gateway access attempt');
     reply.header('www-authenticate', 'Bearer');
     return reply.code(401).send({
       error: 'Unauthorized gateway access'
@@ -50,14 +52,15 @@ function registerGatewayAuth(app: FastifyInstance, config: Config): void {
 export async function createServer(config: Config) {
   const app = Fastify({
     logger: {
-      level: config.log.level
+      level: config.log.level,
+      redact: LOG_REDACT_PATHS
     }
   });
 
   registerGatewayAuth(app, config);
 
   const upstreamPool = new UpstreamPool(config);
-  const scheduler = new Scheduler(config, upstreamPool);
+  const scheduler = new Scheduler(config, upstreamPool, app.log);
   const dispatcher = new Dispatcher(config, scheduler, upstreamPool);
 
   if (config.health.enable) {
@@ -65,7 +68,7 @@ export async function createServer(config: Config) {
   }
 
   if (config.metrics.enable) {
-    await registerMetricsRoute(app, config.metrics.path, upstreamPool);
+    await registerMetricsRoute(app, config.metrics.path, upstreamPool, scheduler);
   }
 
   if (config.status.enable) {

@@ -12,6 +12,7 @@ export type UpstreamConfig = {
   baseUrl: string;
   apiKey: string;
   weight?: number;
+  maxConcurrentRequests?: number;
 };
 
 export type Config = {
@@ -27,6 +28,10 @@ export type Config = {
   };
   routing: {
     strategy: RoutingStrategy;
+  };
+  concurrency: {
+    acquireTimeoutMs: number;
+    maxPendingRequests: number;
   };
   upstreams: UpstreamConfig[];
   retry: {
@@ -65,6 +70,8 @@ export type UpstreamState = {
   weight: number;
   availableAt: number;
   lastUsedAt: number | null;
+  inFlight: number;
+  maxConcurrentRequests: number | null;
   successCount: number;
   failCount: number;
   rateLimitCount: number;

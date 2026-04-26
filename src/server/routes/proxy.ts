@@ -139,14 +139,55 @@ export async function registerProxyRoutes(app: FastifyInstance, dispatcher: Disp
     handler: async (request: RawBodyRequest, reply: FastifyReply) => {
       const requestId = createRequestId();
       const logger = request.log.child({ requestId });
+      const requestStartedAt = Date.now();
+      const requestPath = request.raw.url?.split('?')[0] ?? request.url;
+      const queryString = request.raw.url?.split('?')[1] ?? '';
       const bodySource = createReplayableRequestBody(request.raw, request.method);
+
+      logger.info(
+        {
+          method: request.method,
+          path: requestPath,
+          hasQueryString: queryString.length > 0,
+          contentType: request.headers['content-type'] ?? null,
+          contentLength: request.headers['content-length'] ?? null,
+          remoteAddress: request.ip
+        },
+        'proxy request received'
+      );
+
+      reply.raw.once('finish', () => {
+        logger.info(
+          {
+            method: request.method,
+            path: requestPath,
+            statusCode: reply.statusCode,
+            elapsedMs: Date.now() - requestStartedAt
+          },
+          'proxy response completed'
+        );
+      });
+
+      reply.raw.once('close', () => {
+        if (!reply.raw.writableEnded) {
+          logger.warn(
+            {
+              method: request.method,
+              path: requestPath,
+              statusCode: reply.statusCode,
+              elapsedMs: Date.now() - requestStartedAt
+            },
+            'proxy response closed before completion'
+          );
+        }
+      });
 
       try {
         const { statusCode, headers, body, upstreamId } = await dispatcher.dispatch(
           {
             method: request.method,
-            path: request.raw.url?.split('?')[0] ?? request.url,
-            queryString: request.raw.url?.split('?')[1] ?? '',
+            path: requestPath,
+            queryString,
             headers: request.headers,
             signal: bodySource.signal,
             getBody: bodySource.getBody
@@ -163,14 +204,14 @@ export async function registerProxyRoutes(app: FastifyInstance, dispatcher: Disp
         return reply.send(body);
       } catch (error) {
         if (error instanceof UpstreamUnavailableError) {
-          request.log.error({ requestId, error }, 'request failed after exhausting upstreams');
+          logger.error({ error, elapsedMs: Date.now() - requestStartedAt }, 'request failed after exhausting upstreams');
           reply.code(error.statusCode).header('x-request-id', requestId);
           return {
             error: error.message
           };
         }
 
-        request.log.error({ requestId, error }, 'unexpected proxy failure');
+        logger.error({ error, elapsedMs: Date.now() - requestStartedAt }, 'unexpected proxy failure');
         reply.code(500).header('x-request-id', requestId);
         return {
           error: 'Internal gateway error'

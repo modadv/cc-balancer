@@ -12,6 +12,10 @@ export const DEFAULT_CONFIG = {
   routing: {
     strategy: 'least-fail'
   },
+  concurrency: {
+    acquireTimeoutMs: 30_000,
+    maxPendingRequests: 1024
+  },
   retry: {
     maxAttempts: 0,
     perUpstreamRetries: 2,
