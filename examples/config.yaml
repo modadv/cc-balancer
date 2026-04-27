@@ -15,6 +15,19 @@ concurrency:
   acquireTimeoutMs: 30000
   maxPendingRequests: 1024
 
+requestTimeout:
+  # Max wait for upstream response headers. Default 600000 (10 min) tolerates
+  # long-tail TTFT for non-streaming / thinking-heavy requests. 0 disables it,
+  # but is NOT recommended: a stuck connection will permanently consume an
+  # inFlight slot and can deadlock an upstream.
+  headersMs: 600000
+  # Max gap between body bytes (idle timeout for the response stream).
+  # Default 120000 (2 min) is safely above Anthropic SSE keepalive cadence
+  # (typically <60s) and below most middlebox idle-kill thresholds (5-10 min).
+  # Setting to 0 disables it, which can cause inFlight leaks if intermediaries
+  # silently drop the connection without sending FIN/RST.
+  bodyMs: 120000
+
 upstreams:
   - id: official-1
     baseUrl: https://api.anthropic.com

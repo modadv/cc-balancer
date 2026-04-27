@@ -38,6 +38,12 @@ const configSchema = z
         maxPendingRequests: z.number().int().nonnegative().default(DEFAULT_CONFIG.concurrency.maxPendingRequests)
       })
       .default(DEFAULT_CONFIG.concurrency),
+    requestTimeout: z
+      .object({
+        headersMs: z.number().int().nonnegative().default(DEFAULT_CONFIG.requestTimeout.headersMs),
+        bodyMs: z.number().int().nonnegative().default(DEFAULT_CONFIG.requestTimeout.bodyMs)
+      })
+      .default(DEFAULT_CONFIG.requestTimeout),
     upstreams: z.array(upstreamSchema).min(1, 'at least one upstream is required'),
     retry: z
       .object({

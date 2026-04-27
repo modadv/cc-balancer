@@ -16,6 +16,10 @@ export const DEFAULT_CONFIG = {
     acquireTimeoutMs: 30_000,
     maxPendingRequests: 1024
   },
+  requestTimeout: {
+    headersMs: 600_000,
+    bodyMs: 120_000
+  },
   retry: {
     maxAttempts: 0,
     perUpstreamRetries: 2,

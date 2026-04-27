@@ -56,6 +56,7 @@ function createConfig(upstreams: Config['upstreams'], overrides?: Partial<Config
     log: { level: 'error' },
     routing: { strategy: 'round-robin' },
     concurrency: { acquireTimeoutMs: 50, maxPendingRequests: 10 },
+    requestTimeout: { headersMs: 30_000, bodyMs: 0 },
     upstreams,
     retry: {
       maxAttempts: 2,

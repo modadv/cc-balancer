@@ -33,6 +33,10 @@ export type Config = {
     acquireTimeoutMs: number;
     maxPendingRequests: number;
   };
+  requestTimeout: {
+    headersMs: number;
+    bodyMs: number;
+  };
   upstreams: UpstreamConfig[];
   retry: {
     maxAttempts: number;

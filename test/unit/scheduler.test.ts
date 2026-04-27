@@ -10,6 +10,7 @@ const baseConfig: Config = {
   log: { level: 'info' },
   routing: { strategy: 'least-fail' },
   concurrency: { acquireTimeoutMs: 20, maxPendingRequests: 10 },
+  requestTimeout: { headersMs: 600_000, bodyMs: 0 },
   upstreams: [
     { id: 'a', baseUrl: 'https://a.example.com', apiKey: 'a' },
     { id: 'b', baseUrl: 'https://b.example.com', apiKey: 'b' }

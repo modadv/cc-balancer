@@ -1,6 +1,6 @@
 {
   "name": "cc-balancer",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Config-driven Claude API gateway with multi-upstream failover and cooldown handling.",
   "type": "module",
   "bin": {

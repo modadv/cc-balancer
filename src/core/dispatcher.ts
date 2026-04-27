@@ -117,6 +117,15 @@ function releaseWhenBodyEnds(
   return body;
 }
 
+function isTimeoutError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return (
+    code === 'UND_ERR_HEADERS_TIMEOUT' ||
+    code === 'UND_ERR_BODY_TIMEOUT' ||
+    code === 'UND_ERR_CONNECT_TIMEOUT'
+  );
+}
+
 function markFailureByType(config: Config, upstreamPool: UpstreamPool, upstream: UpstreamState, errorType: ErrorType): void {
   upstreamPool.markFailure(upstream);
 
@@ -234,8 +243,8 @@ export class Dispatcher {
             headers: createHeaders(requestData.headers, upstream.apiKey),
             body: requestBody,
             signal: requestData.signal,
-            headersTimeout: 30_000,
-            bodyTimeout: 0
+            headersTimeout: this.config.requestTimeout.headersMs,
+            bodyTimeout: this.config.requestTimeout.bodyMs
           });
 
           this.upstreamPool.touch(upstream);
@@ -328,7 +337,8 @@ export class Dispatcher {
           );
           break;
         } catch (error) {
-          const isRetryableNetworkError = sameUpstreamAttempt < sameUpstreamBudget;
+          const timeoutError = isTimeoutError(error);
+          const isRetryableNetworkError = !timeoutError && sameUpstreamAttempt < sameUpstreamBudget;
 
           if (isRetryableNetworkError) {
             logger.warn(
