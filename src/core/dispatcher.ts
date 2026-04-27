@@ -69,7 +69,7 @@ function classifyResponse(statusCode: number): ErrorType {
     return 'rate-limit';
   }
 
-  if (statusCode === 403) {
+  if (statusCode === 402 || statusCode === 403) {
     return 'quota-exceeded';
   }
 
@@ -85,7 +85,7 @@ function classifyResponse(statusCode: number): ErrorType {
 }
 
 function isRetriableStatus(statusCode: number): boolean {
-  return statusCode === 429 || statusCode === 403 || statusCode >= 500;
+  return statusCode >= 400;
 }
 
 function releaseWhenBodyEnds(

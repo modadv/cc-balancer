@@ -126,6 +126,96 @@ describe('gateway integration', () => {
     });
   });
 
+  it('fails over from a 402 daily quota upstream to a healthy upstream', async () => {
+    const upstreamA = await startUpstream(402, {
+      error: {
+        type: 'rate_limit_error',
+        message:
+          '每日额度超限：当前 $100.1216 USD（限制：$100.0000 USD）。将于 2026-04-27T16:00:00.000Z 重置',
+        code: 'rate_limit_exceeded',
+        limit_type: 'daily_quota',
+        current: 100.1216,
+        limit: 100,
+        reset_time: '2026-04-27T16:00:00.000Z'
+      }
+    });
+    const upstreamB = await startUpstream(200, { ok: true });
+    startedServers.push(upstreamA.app, upstreamB.app);
+
+    const config = createConfig([
+      { id: 'a', baseUrl: upstreamA.baseUrl, apiKey: 'key-a' },
+      { id: 'b', baseUrl: upstreamB.baseUrl, apiKey: 'key-b' }
+    ]);
+
+    const gateway = await createServer(config);
+    startedServers.push(gateway);
+    await gateway.listen({ host: '127.0.0.1', port: 0 });
+    const address = gateway.server.address();
+
+    if (!address || typeof address === 'string') {
+      throw new Error('failed to resolve gateway address');
+    }
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] })
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-upstream-id')).toBe('b');
+    await expect(response.json()).resolves.toEqual({ ok: true });
+
+    const statusResponse = await fetch(`http://127.0.0.1:${address.port}/upstreams`);
+    const statusJson = (await statusResponse.json()) as {
+      upstreams: Array<{ id: string; available: boolean; quotaExceededCount: number }>;
+    };
+    const upstreamAStatus = statusJson.upstreams.find((upstream) => upstream.id === 'a');
+
+    expect(upstreamAStatus).toMatchObject({
+      available: false,
+      quotaExceededCount: 1
+    });
+  });
+
+  it('fails over from other 4xx upstream responses to a healthy upstream', async () => {
+    const upstreamA = await startUpstream(400, { error: { type: 'invalid_request_error' } });
+    const upstreamB = await startUpstream(200, { ok: true });
+    startedServers.push(upstreamA.app, upstreamB.app);
+
+    const config = createConfig([
+      { id: 'a', baseUrl: upstreamA.baseUrl, apiKey: 'key-a' },
+      { id: 'b', baseUrl: upstreamB.baseUrl, apiKey: 'key-b' }
+    ]);
+
+    const gateway = await createServer(config);
+    startedServers.push(gateway);
+    await gateway.listen({ host: '127.0.0.1', port: 0 });
+    const address = gateway.server.address();
+
+    if (!address || typeof address === 'string') {
+      throw new Error('failed to resolve gateway address');
+    }
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] })
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-upstream-id')).toBe('b');
+    await expect(response.json()).resolves.toEqual({ ok: true });
+
+    const statusResponse = await fetch(`http://127.0.0.1:${address.port}/upstreams`);
+    const statusJson = (await statusResponse.json()) as { upstreams: Array<{ id: string; failCount: number }> };
+    const upstreamAStatus = statusJson.upstreams.find((upstream) => upstream.id === 'a');
+
+    expect(upstreamAStatus).toMatchObject({
+      failCount: 1
+    });
+  });
+
   it('returns 503 when every upstream is in cooldown before dispatch', async () => {
     const upstreamA = await startUpstream(429, { error: 'rate limited' });
     const upstreamB = await startUpstream(429, { error: 'still rate limited' });
