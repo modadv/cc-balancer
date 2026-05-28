@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { request } from 'undici';
 
 import type { Config, ErrorType, ProxyRequestData, RequestAttemptContext, UpstreamState } from './types.js';
@@ -115,6 +116,29 @@ function releaseWhenBodyEnds(
   body.once('close', () => releaseOnce('body-close'));
 
   return body;
+}
+
+function isSSEResponse(contentType: string | undefined): boolean {
+  return contentType !== undefined && contentType.includes('text/event-stream');
+}
+
+async function bufferStream(body: NodeJS.ReadableStream): Promise<{ data: Buffer; complete: boolean }> {
+  const chunks: Buffer[] = [];
+  let complete = false;
+  try {
+    for await (const chunk of body as AsyncIterable<Buffer>) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    complete = true;
+  } catch {
+    complete = false;
+  }
+  return { data: Buffer.concat(chunks), complete };
+}
+
+function isSSEStreamComplete(data: Buffer): boolean {
+  const tail = data.subarray(Math.max(0, data.length - 512)).toString('utf-8');
+  return tail.includes('event: message_stop') || tail.includes('"type":"message_stop"');
 }
 
 function isTimeoutError(error: unknown): boolean {
@@ -250,6 +274,91 @@ export class Dispatcher {
           this.upstreamPool.touch(upstream);
 
           if (response.statusCode >= 200 && response.statusCode < 300) {
+            const contentLength = response.headers['content-length'];
+            const contentType = response.headers['content-type'];
+            const isEmptyResponse = contentLength === '0' ||
+              (contentLength === undefined && !contentType);
+            const isMalformedResponse = response.statusCode === 200 &&
+              contentType === undefined && contentLength === undefined;
+
+            if ((isEmptyResponse || isMalformedResponse) && sameUpstreamAttempt < sameUpstreamBudget) {
+              await response.body.dump().catch(() => {});
+              logger.warn(
+                {
+                  upstreamId: upstream.id,
+                  attempt: context.totalAttempts,
+                  sameUpstreamAttempt,
+                  contentLength,
+                  contentType,
+                  elapsedMs: Date.now() - context.startedAt
+                },
+                'upstream returned empty/malformed 200 response, retrying same upstream'
+              );
+              continue;
+            }
+
+            if (isEmptyResponse || isMalformedResponse) {
+              await response.body.dump().catch(() => {});
+              markFailureByType(this.config, this.upstreamPool, upstream, 'server-error');
+              this.upstreamPool.release(upstream);
+              lastRetriableFailure = true;
+              logger.warn(
+                {
+                  upstreamId: upstream.id,
+                  attempt: context.totalAttempts,
+                  contentLength,
+                  contentType,
+                  elapsedMs: Date.now() - context.startedAt
+                },
+                'upstream returned empty/malformed 200 response, switching upstream'
+              );
+              break;
+            }
+
+            if (isSSEResponse(contentType as string | undefined)) {
+              const { data, complete } = await bufferStream(response.body);
+              this.upstreamPool.release(upstream);
+
+              if (!complete || !isSSEStreamComplete(data)) {
+                lastRetriableFailure = true;
+                markFailureByType(this.config, this.upstreamPool, upstream, 'network-error');
+                logger.warn(
+                  {
+                    upstreamId: upstream.id,
+                    attempt: context.totalAttempts,
+                    sameUpstreamAttempt,
+                    complete,
+                    bufferedBytes: data.length,
+                    elapsedMs: Date.now() - context.startedAt
+                  },
+                  'SSE stream incomplete (missing message_stop), retrying'
+                );
+                if (sameUpstreamAttempt < sameUpstreamBudget) {
+                  continue;
+                }
+                break;
+              }
+
+              this.upstreamPool.markSuccess(upstream);
+              logger.info(
+                {
+                  upstreamId: upstream.id,
+                  statusCode: response.statusCode,
+                  attempt: context.totalAttempts,
+                  bufferedBytes: data.length,
+                  elapsedMs: Date.now() - context.startedAt
+                },
+                'SSE stream buffered and verified complete'
+              );
+
+              return {
+                statusCode: response.statusCode,
+                headers: response.headers,
+                body: Readable.from(data),
+                upstreamId: upstream.id
+              };
+            }
+
             this.upstreamPool.markSuccess(upstream);
             logger.info(
               {

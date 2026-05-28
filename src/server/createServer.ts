@@ -11,7 +11,12 @@ import { registerProxyRoutes } from './routes/proxy.js';
 import { registerUpstreamsRoute } from './routes/upstreams.js';
 import { LOG_REDACT_PATHS } from '../utils/logger.js';
 
-function extractBearerToken(request: FastifyRequest): string | null {
+function extractAuthToken(request: FastifyRequest): string | null {
+  const xApiKey = request.headers['x-api-key'];
+  if (typeof xApiKey === 'string' && xApiKey.length > 0) {
+    return xApiKey;
+  }
+
   const authorization = request.headers.authorization;
   if (!authorization) {
     return null;
@@ -22,7 +27,16 @@ function extractBearerToken(request: FastifyRequest): string | null {
 }
 
 function isPublicPath(config: Config, path: string): boolean {
-  return config.health.enable && path === config.health.path;
+  if (config.health.enable && path === config.health.path) {
+    return true;
+  }
+  if (config.metrics.enable && path === config.metrics.path) {
+    return true;
+  }
+  if (config.status.enable && path === config.status.path) {
+    return true;
+  }
+  return false;
 }
 
 function registerGatewayAuth(app: FastifyInstance, config: Config): void {
@@ -36,15 +50,20 @@ function registerGatewayAuth(app: FastifyInstance, config: Config): void {
       return;
     }
 
-    const token = extractBearerToken(request);
+    const token = extractAuthToken(request);
     if (token === config.gateway.authToken) {
       return;
     }
 
+    if (!token) {
+      return reply.code(403).send({
+        error: { type: 'forbidden', message: 'Request not allowed' }
+      });
+    }
+
     request.log.warn({ path: requestPath, remoteAddress: request.ip }, 'unauthorized gateway access attempt');
-    reply.header('www-authenticate', 'Bearer');
     return reply.code(401).send({
-      error: 'Unauthorized gateway access'
+      error: { type: 'authentication_error', message: 'Invalid x-api-key' }
     });
   });
 }

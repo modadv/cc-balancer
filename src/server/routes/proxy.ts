@@ -201,6 +201,8 @@ export async function registerProxyRoutes(app: FastifyInstance, dispatcher: Disp
         reply.header('x-upstream-id', upstreamId);
         setResponseHeaders(reply, headers);
 
+        logger.debug?.({ upstreamResponseHeaders: headers }, 'upstream response headers');
+
         return reply.send(body);
       } catch (error) {
         if (error instanceof UpstreamUnavailableError) {
